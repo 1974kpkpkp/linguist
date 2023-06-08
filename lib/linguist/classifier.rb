@@ -3,6 +3,27 @@ require 'linguist/tokenizer'
 module Linguist
   # Language bayesian classifier.
   class Classifier
+    CLASSIFIER_CONSIDER_BYTES = 50 * 1024
+
+    # Public: Use the classifier to detect language of the blob.
+    #
+    # blob               - An object that quacks like a blob.
+    # possible_languages - Array of Language objects
+    #
+    # Examples
+    #
+    #   Classifier.call(FileBlob.new("path/to/file"), [
+    #     Language["Ruby"], Language["Python"]
+    #   ])
+    #
+    # Returns an Array of Language objects, most probable first.
+    def self.call(blob, possible_languages)
+      language_names = possible_languages.map(&:name)
+      classify(Samples.cache, blob.data[0...CLASSIFIER_CONSIDER_BYTES], language_names).map do |name, _|
+        Language[name] # Return the actual Language objects
+      end
+    end
+
     # Public: Train classifier that data is a certain language.
     #
     # db       - Hash classifier database object
@@ -18,7 +39,11 @@ module Linguist
     # Set LINGUIST_DEBUG=1 or =2 to see probabilities per-token or
     # per-language.  See also #dump_all_tokens, below.
     def self.train!(db, language, data)
-      tokens = Tokenizer.tokenize(data)
+      tokens = data
+      tokens = Tokenizer.tokenize(tokens) if tokens.is_a?(String)
+
+      counts = Hash.new(0)
+      tokens.each { |tok| counts[tok] += 1 }
 
       db['tokens_total'] ||= 0
       db['languages_total'] ||= 0
@@ -26,13 +51,13 @@ module Linguist
       db['language_tokens'] ||= {}
       db['languages'] ||= {}
 
-      tokens.each do |token|
+      counts.each do |token, count|
         db['tokens'][language] ||= {}
         db['tokens'][language][token] ||= 0
-        db['tokens'][language][token] += 1
+        db['tokens'][language][token] += count
         db['language_tokens'][language] ||= 0
-        db['language_tokens'][language] += 1
-        db['tokens_total'] += 1
+        db['language_tokens'][language] += count
+        db['tokens_total'] += count
       end
       db['languages'][language] ||= 0
       db['languages'][language] += 1
@@ -66,6 +91,7 @@ module Linguist
       @tokens          = db['tokens']
       @language_tokens = db['language_tokens']
       @languages       = db['languages']
+      @unknown_logprob = Math.log(1 / db['tokens_total'].to_f)
     end
 
     # Internal: Guess language of data
@@ -76,15 +102,18 @@ module Linguist
     # Returns sorted Array of result pairs. Each pair contains the
     # String language name and a Float score.
     def classify(tokens, languages)
-      return [] if tokens.nil?
+      return [] if tokens.nil? || languages.empty?
       tokens = Tokenizer.tokenize(tokens) if tokens.is_a?(String)
       scores = {}
 
       debug_dump_all_tokens(tokens, languages) if verbosity >= 2
 
+      counts = Hash.new(0)
+      tokens.each { |tok| counts[tok] += 1 }
+
       languages.each do |language|
-        scores[language] = tokens_probability(tokens, language) + language_probability(language)
-        debug_dump_probabilities(tokens, language, scores[language]) if verbosity >= 1
+        scores[language] = tokens_probability(counts, language) + language_probability(language)
+        debug_dump_probabilities(counts, language, scores[language]) if verbosity >= 1
       end
 
       scores.sort { |a, b| b[1] <=> a[1] }.map { |score| [score[0], score[1]] }
@@ -96,23 +125,27 @@ module Linguist
     # language - Language to check.
     #
     # Returns Float between 0.0 and 1.0.
-    def tokens_probability(tokens, language)
-      tokens.inject(0.0) do |sum, token|
-        sum += Math.log(token_probability(token, language))
+    def tokens_probability(counts, language)
+      sum = 0
+      counts.each do |token, count|
+        sum += count * token_probability(token, language)
       end
+      sum
     end
 
-    # Internal: Probably of token in language occurring - P(F | C)
+    # Internal: Log-probability of token in language occurring - P(F | C)
     #
     # token    - String token.
     # language - Language to check.
     #
-    # Returns Float between 0.0 and 1.0.
+    # Returns Float.
     def token_probability(token, language)
-      if @tokens[language][token].to_f == 0.0
-        1 / @tokens_total.to_f
+      count = @tokens[language][token]
+      if count.nil? || count == 0
+        # This is usually the most common case, so we cache the result.
+        @unknown_logprob
       else
-        @tokens[language][token].to_f / @language_tokens[language].to_f
+        Math.log(count.to_f / @language_tokens[language].to_f)
       end
     end
 
@@ -157,12 +190,11 @@ module Linguist
         token_map.sort.each { |tok, count|
           arr = languages.map { |lang| [lang, token_probability(tok, lang)] }
           min = arr.map { |a,b| b }.min
-          minlog = Math.log(min)
           if !arr.inject(true) { |result, n| result && n[1] == arr[0][1] }
             printf "%#{maxlen}s%5d", tok, count
 
             puts arr.map { |ent|
-              ent[1] == min ? "         -" : sprintf("%10.3f", count * (Math.log(ent[1]) - minlog))
+              ent[1] == min ? "         -" : sprintf("%10.3f", count * (ent[1] - min))
             }.join
           end
         }

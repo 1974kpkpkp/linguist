@@ -2,28 +2,28 @@
 #
 # This file should only be edited by GitHub staff
 
-- ActionScript
-- Bash
 - C
 - C#
 - C++
-- CSS
-- Clojure
 - CoffeeScript
-- Common Lisp
-- Diff
-- Emacs Lisp
-- Erlang
+- CSS
+- Dart
+- DM
+- Elixir
+- Go
+- Groovy
 - HTML
-- Haskell
 - Java
 - JavaScript
-- Lua
+- Kotlin
 - Objective-C
-- PHP
 - Perl
+- PHP
+- PowerShell
 - Python
 - Ruby
-- SQL
+- Rust
 - Scala
-- Scheme
+- Shell
+- Swift
+- TypeScript

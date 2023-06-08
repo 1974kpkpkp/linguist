@@ -1,11 +1,12 @@
 begin
-  require 'json'
+  require 'yajl'
 rescue LoadError
-  require 'yaml'
+  require 'json'
 end
 
-require 'linguist/md5'
+require 'linguist/sha256'
 require 'linguist/classifier'
+require 'linguist/shebang'
 
 module Linguist
   # Model for accessing classifier training data.
@@ -16,10 +17,15 @@ module Linguist
     # Path for serialized samples db
     PATH = File.expand_path('../samples.json', __FILE__)
 
-    # Hash of serialized samples object
-    if File.exist?(PATH)
-      serializer = defined?(JSON) ? JSON : YAML
-      DATA = serializer.load(File.read(PATH))
+    # Hash of serialized samples object, cached in memory
+    def self.cache
+      @cache ||= load_samples
+    end
+
+    # Hash of serialized samples object, uncached
+    def self.load_samples
+      serializer = defined?(Yajl) ? Yajl : JSON
+      serializer.load(File.read(PATH, encoding: 'utf-8'))
     end
 
     # Public: Iterate over each sample.
@@ -28,12 +34,8 @@ module Linguist
     #
     # Returns nothing.
     def self.each(&block)
-      Dir.entries(ROOT).each do |category|
+      Dir.entries(ROOT).sort!.each do |category|
         next if category == '.' || category == '..'
-
-        # Skip text and binary for now
-        # Possibly reconsider this later
-        next if category == 'Text' || category == 'Binary'
 
         dirname = File.join(ROOT, category)
         Dir.entries(dirname).each do |filename|
@@ -50,15 +52,14 @@ module Linguist
               })
             end
           else
-            if File.extname(filename) == ""
-              raise "#{File.join(dirname, filename)} is missing an extension, maybe it belongs in filenames/ subdir"
-            end
+            path = File.join(dirname, filename)
+            extname = File.extname(filename)
 
             yield({
-              :path     => File.join(dirname, filename),
+              :path     => path,
               :language => category,
-              :interpreter => File.exist?(filename) ? Linguist.interpreter_from_shebang(File.read(filename)) : nil,
-              :extname  => File.extname(filename)
+              :interpreter => Shebang.interpreter(File.read(path)),
+              :extname  => extname.empty? ? nil : extname
             })
           end
         end
@@ -105,45 +106,9 @@ module Linguist
         Classifier.train!(db, language_name, data)
       end
 
-      db['md5'] = Linguist::MD5.hexdigest(db)
+      db['sha256'] = Linguist::SHA256.hexdigest(db)
 
       db
     end
   end
-
-  # Used to retrieve the interpreter from the shebang line of a file's
-  # data.
-  def self.interpreter_from_shebang(data)
-    lines = data.lines.to_a
-
-    if lines.any? && (match = lines[0].match(/(.+)\n?/)) && (bang = match[0]) =~ /^#!/
-      bang.sub!(/^#! /, '#!')
-      tokens = bang.split(' ')
-      pieces = tokens.first.split('/')
-
-      if pieces.size > 1
-        script = pieces.last
-      else
-        script = pieces.first.sub('#!', '')
-      end
-
-      script = script == 'env' ? tokens[1] : script
-
-      # "python2.6" -> "python"
-      if script =~ /((?:\d+\.?)+)/
-        script.sub! $1, ''
-      end
-
-      # Check for multiline shebang hacks that call `exec`
-      if script == 'sh' &&
-        lines[0...5].any? { |l| l.match(/exec (\w+).+\$0.+\$@/) }
-        script = $1
-      end
-
-      script
-    else
-      nil
-    end
-  end
-
 end
