@@ -1,13 +1,16 @@
 require 'linguist/generated'
-require 'linguist/language'
-
 require 'charlock_holmes'
 require 'escape_utils'
 require 'mime/types'
-require 'pygments'
 require 'yaml'
 
 module Linguist
+  # DEPRECATED Avoid mixing into Blob classes. Prefer functional interfaces
+  # like `Linguist.detect` over `Blob#language`. Functions are much easier to
+  # cache and compose.
+  #
+  # Avoid adding additional bloat to this module.
+  #
   # BlobHelper is a mixin for Blobish classes that respond to "name",
   # "data" and "size" such as Grit::Blob.
   module BlobHelper
@@ -58,6 +61,15 @@ module Linguist
       _mime_type ? _mime_type.binary? : false
     end
 
+    # Internal: Is the blob binary according to its mime type,
+    # overriding it if we have better data from the languages.yml
+    # database.
+    #
+    # Return true or false
+    def likely_binary?
+      binary_mime_type? && !Language.find_by_filename(name)
+    end
+
     # Public: Get the Content-Type header value
     #
     # This value is used when serving raw blobs.
@@ -87,13 +99,19 @@ module Linguist
       elsif name.nil?
         "attachment"
       else
-        "attachment; filename=#{EscapeUtils.escape_url(File.basename(name))}"
+        "attachment; filename=#{EscapeUtils.escape_url(name)}"
       end
     end
 
     def encoding
       if hash = detect_encoding
         hash[:encoding]
+      end
+    end
+
+    def ruby_encoding
+      if hash = detect_encoding
+        hash[:ruby_encoding]
       end
     end
 
@@ -128,6 +146,13 @@ module Linguist
       end
     end
 
+    # Public: Is the blob empty?
+    #
+    # Return true or false
+    def empty?
+      data.nil? || data == ""
+    end
+
     # Public: Is the blob text?
     #
     # Return true or false
@@ -139,7 +164,28 @@ module Linguist
     #
     # Return true or false
     def image?
-      ['.png', '.jpg', '.jpeg', '.gif'].include?(extname)
+      ['.png', '.jpg', '.jpeg', '.gif'].include?(extname.downcase)
+    end
+
+    # Public: Is the blob a supported 3D model format?
+    #
+    # Return true or false
+    def solid?
+      extname.downcase == '.stl'
+    end
+
+    # Public: Is this blob a CSV file?
+    #
+    # Return true or false
+    def csv?
+      text? && extname.downcase == '.csv'
+    end
+
+    # Public: Is the blob a PDF?
+    #
+    # Return true or false
+    def pdf?
+      extname.downcase == '.pdf'
     end
 
     MEGABYTE = 1024 * 1024
@@ -153,20 +199,12 @@ module Linguist
 
     # Public: Is the blob safe to colorize?
     #
-    # We use Pygments.rb for syntax highlighting blobs, which
-    # has some quirks and also is essentially 'un-killable' via
-    # normal timeout.  To workaround this we try to
-    # carefully handling Pygments.rb anything it can't handle.
-    #
     # Return true or false
     def safe_to_colorize?
       !large? && text? && !high_ratio_of_long_lines?
     end
 
     # Internal: Does the blob have a ratio of long lines?
-    #
-    # These types of files are usually going to make Pygments.rb
-    # angry if we try to colorize them.
     #
     # Return true or false
     def high_ratio_of_long_lines?
@@ -195,7 +233,22 @@ module Linguist
     #
     # Return true or false
     def vendored?
-      name =~ VendoredRegexp ? true : false
+      path =~ VendoredRegexp ? true : false
+    end
+
+    documentation_paths = YAML.load_file(File.expand_path("../documentation.yml", __FILE__))
+    DocumentationRegexp = Regexp.new(documentation_paths.join('|'))
+
+    # Public: Is the blob in a documentation directory?
+    #
+    # Documentation files are ignored by language statistics.
+    #
+    # See "documentation.yml" for a list of documentation conventions that match
+    # this pattern.
+    #
+    # Return true or false
+    def documentation?
+      path =~ DocumentationRegexp ? true : false
     end
 
     # Public: Get each line of data
@@ -206,29 +259,77 @@ module Linguist
     def lines
       @lines ||=
         if viewable? && data
-          data.split(line_split_character, -1)
+          # `data` is usually encoded as ASCII-8BIT even when the content has
+          # been detected as a different encoding. However, we are not allowed
+          # to change the encoding of `data` because we've made the implicit
+          # guarantee that each entry in `lines` is encoded the same way as
+          # `data`.
+          #
+          # Instead, we re-encode each possible newline sequence as the
+          # detected encoding, then force them back to the encoding of `data`
+          # (usually a binary encoding like ASCII-8BIT). This means that the
+          # byte sequence will match how newlines are likely encoded in the
+          # file, but we don't have to change the encoding of `data` as far as
+          # Ruby is concerned. This allows us to correctly parse out each line
+          # without changing the encoding of `data`, and
+          # also--importantly--without having to duplicate many (potentially
+          # large) strings.
+          begin
+            
+            data.split(encoded_newlines_re, -1)
+          rescue Encoding::ConverterNotFoundError
+            # The data is not splittable in the detected encoding.  Assume it's
+            # one big line.
+            [data]
+          end
         else
           []
         end
     end
 
-    # Character used to split lines. This is almost always "\n" except when Mac
-    # Format is detected in which case it's "\r".
-    #
-    # Returns a split pattern string.
-    def line_split_character
-      @line_split_character ||= (mac_format?? "\r" : "\n")
+    def encoded_newlines_re
+      @encoded_newlines_re ||= Regexp.union(["\r\n", "\r", "\n"].
+                                              map { |nl| nl.encode(ruby_encoding, "ASCII-8BIT").force_encoding(data.encoding) })
+
     end
 
-    # Public: Is the data in ** Mac Format **. This format uses \r (0x0d) characters
-    # for line ends and does not include a \n (0x0a).
-    #
-    # Returns true when mac format is detected.
-    def mac_format?
-      return if !viewable?
-      if pos = data[0, 4096].index("\r")
-        data[pos + 1] != ?\n
+    def first_lines(n)
+      return lines[0...n] if defined? @lines
+      return [] unless viewable? && data
+
+      i, c = 0, 0
+      while c < n && j = data.index(encoded_newlines_re, i)
+        i = j + $&.length
+        c += 1
       end
+      data[0...i].split(encoded_newlines_re, -1)
+    end
+
+    def last_lines(n)
+      if defined? @lines
+        if n >= @lines.length
+          @lines
+        else
+          lines[-n..-1]
+        end
+      end
+      return [] unless viewable? && data
+
+      no_eol = true
+      i, c = data.length, 0
+      k = i
+      while c < n && j = data.rindex(encoded_newlines_re, i - 1)
+        if c == 0 && j + $&.length == i
+          no_eol = false
+          n += 1
+        end
+        i = j
+        k = j + $&.length
+        c += 1
+      end
+      r = data[k..-1].split(encoded_newlines_re, -1)
+      r.pop if !no_eol
+      r
     end
 
     # Public: Get number of lines of code
@@ -251,44 +352,14 @@ module Linguist
 
     # Public: Is the blob a generated file?
     #
-    # Generated source code is supressed in diffs and is ignored by
+    # Generated source code is suppressed in diffs and is ignored by
     # language statistics.
     #
     # May load Blob#data
     #
     # Return true or false
     def generated?
-      @_generated ||= Generated.generated?(name, lambda { data })
-    end
-
-    # Public: Should the blob be indexed for searching?
-    #
-    # Excluded:
-    # - Files over 0.1MB
-    # - Non-text files
-    # - Langauges marked as not searchable
-    # - Generated source files
-    #
-    # Please add additional test coverage to
-    # `test/test_blob.rb#test_indexable` if you make any changes.
-    #
-    # Return true or false
-    def indexable?
-      if size > 100 * 1024
-        false
-      elsif binary?
-        false
-      elsif extname == '.txt'
-        true
-      elsif language.nil?
-        false
-      elsif !language.searchable?
-        false
-      elsif generated?
-        false
-      else
-        true
-      end
+      @_generated ||= Generated.generated?(path, lambda { data })
     end
 
     # Public: Detects the Language of the blob.
@@ -297,48 +368,25 @@ module Linguist
     #
     # Returns a Language or nil if none is detected
     def language
-      return @language if defined? @language
-
-      if defined?(@data) && @data.is_a?(String)
-        data = @data
-      else
-        data = lambda { binary_mime_type? ? "" : self.data }
-      end
-
-      @language = Language.detect(name.to_s, data, mode)
+      @language ||= Linguist.detect(self)
     end
 
-    # Internal: Get the lexer of the blob.
-    #
-    # Returns a Lexer.
-    def lexer
-      language ? language.lexer : Pygments::Lexer.find_by_name('Text only')
+    # Internal: Get the TextMate compatible scope for the blob
+    def tm_scope
+      language && language.tm_scope
     end
 
-    # Public: Highlight syntax of blob
-    #
-    # options - A Hash of options (defaults to {})
-    #
-    # Returns html String
-    def colorize(options = {})
-      return unless safe_to_colorize?
-      options[:options] ||= {}
-      options[:options][:encoding] ||= encoding
-      lexer.highlight(data, options)
-    end
+    DETECTABLE_TYPES = [:programming, :markup].freeze
 
-    # Public: Highlight syntax of blob without the outer highlight div
-    # wrapper.
-    #
-    # options - A Hash of options (defaults to {})
-    #
-    # Returns html String
-    def colorize_without_wrapper(options = {})
-      if text = colorize(options)
-        text[%r{<div class="highlight"><pre>(.*?)</pre>\s*</div>}m, 1]
-      else
-        ''
-      end
+    # Internal: Should this blob be included in repository language statistics?
+    def include_in_language_stats?
+      !vendored? &&
+      !documentation? &&
+      !generated? &&
+      language && ( defined?(detectable?) && !detectable?.nil? ?
+        detectable? :
+        DETECTABLE_TYPES.include?(language.type)
+      )
     end
   end
 end

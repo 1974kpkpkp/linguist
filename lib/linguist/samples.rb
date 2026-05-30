@@ -1,7 +1,12 @@
-require 'yaml'
+begin
+  require 'yajl'
+rescue LoadError
+  require 'yaml'
+end
 
 require 'linguist/md5'
 require 'linguist/classifier'
+require 'linguist/shebang'
 
 module Linguist
   # Model for accessing classifier training data.
@@ -13,8 +18,11 @@ module Linguist
     PATH = File.expand_path('../samples.json', __FILE__)
 
     # Hash of serialized samples object
-    if File.exist?(PATH)
-      DATA = YAML.load_file(PATH)
+    def self.cache
+      @cache ||= begin
+        serializer = defined?(Yajl) ? Yajl : YAML
+        serializer.load(File.read(PATH, encoding: 'utf-8'))
+      end
     end
 
     # Public: Iterate over each sample.
@@ -23,12 +31,8 @@ module Linguist
     #
     # Returns nothing.
     def self.each(&block)
-      Dir.entries(ROOT).each do |category|
+      Dir.entries(ROOT).sort!.each do |category|
         next if category == '.' || category == '..'
-
-        # Skip text and binary for now
-        # Possibly reconsider this later
-        next if category == 'Text' || category == 'Binary'
 
         dirname = File.join(ROOT, category)
         Dir.entries(dirname).each do |filename|
@@ -45,14 +49,14 @@ module Linguist
               })
             end
           else
-            if File.extname(filename) == ""
-              raise "#{File.join(dirname, filename)} is missing an extension, maybe it belongs in filenames/ subdir"
-            end
+            path = File.join(dirname, filename)
+            extname = File.extname(filename)
 
             yield({
-              :path     => File.join(dirname, filename),
+              :path     => path,
               :language => category,
-              :extname  => File.extname(filename)
+              :interpreter => Shebang.interpreter(File.read(path)),
+              :extname  => extname.empty? ? nil : extname
             })
           end
         end
@@ -67,6 +71,7 @@ module Linguist
     def self.data
       db = {}
       db['extnames'] = {}
+      db['interpreters'] = {}
       db['filenames'] = {}
 
       each do |sample|
@@ -76,12 +81,22 @@ module Linguist
           db['extnames'][language_name] ||= []
           if !db['extnames'][language_name].include?(sample[:extname])
             db['extnames'][language_name] << sample[:extname]
+            db['extnames'][language_name].sort!
+          end
+        end
+
+        if sample[:interpreter]
+          db['interpreters'][language_name] ||= []
+          if !db['interpreters'][language_name].include?(sample[:interpreter])
+            db['interpreters'][language_name] << sample[:interpreter]
+            db['interpreters'][language_name].sort!
           end
         end
 
         if sample[:filename]
           db['filenames'][language_name] ||= []
           db['filenames'][language_name] << sample[:filename]
+          db['filenames'][language_name].sort!
         end
 
         data = File.read(sample[:path])

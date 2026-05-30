@@ -1,317 +1,349 @@
-require 'linguist/file_blob'
-require 'linguist/samples'
+require_relative "./helper"
 
-require 'test/unit'
-require 'mocha'
-require 'mime/types'
-require 'pygments'
-
-class TestBlob < Test::Unit::TestCase
+class TestBlob < Minitest::Test
   include Linguist
 
-  Lexer = Pygments::Lexer
-
-  def samples_path
-    File.expand_path("../../samples", __FILE__)
+  def setup
+    silence_warnings do
+      # git blobs are normally loaded as ASCII-8BIT since they may contain data
+      # with arbitrary encoding not known ahead of time
+      @original_external = Encoding.default_external
+      Encoding.default_external = Encoding.find("ASCII-8BIT")
+    end
   end
 
-  def blob(name)
-    name = File.join(samples_path, name) unless name =~ /^\//
-    FileBlob.new(name, samples_path)
+  def teardown
+    silence_warnings do
+      Encoding.default_external = @original_external
+    end
   end
 
   def script_blob(name)
-    blob = blob(name)
+    blob = sample_blob_memory(name)
     blob.instance_variable_set(:@name, 'script')
     blob
   end
 
   def test_name
-    assert_equal "foo.rb", blob("foo.rb").name
+    assert_equal "foo.rb", sample_blob_memory("Ruby/foo.rb").name
   end
 
   def test_mime_type
-    assert_equal "application/postscript", blob("Binary/octocat.ai").mime_type
-    assert_equal "application/x-ruby", blob("Ruby/grit.rb").mime_type
-    assert_equal "application/x-sh", blob("Shell/script.sh").mime_type
-    assert_equal "application/xml", blob("XML/bar.xml").mime_type
-    assert_equal "audio/ogg", blob("Binary/foo.ogg").mime_type
-    assert_equal "text/plain", blob("Text/README").mime_type
+    assert_equal "application/postscript", fixture_blob_memory("Binary/octocat.ai").mime_type
+    assert_equal "application/x-ruby", sample_blob_memory("Ruby/grit.rb").mime_type
+    assert_equal "application/x-sh", sample_blob_memory("Shell/script.sh").mime_type
+    assert_equal "text/plain", fixture_blob_memory("Data/README").mime_type
   end
 
   def test_content_type
-    assert_equal "application/pdf", blob("Binary/foo.pdf").content_type
-    assert_equal "audio/ogg", blob("Binary/foo.ogg").content_type
-    assert_equal "image/png", blob("Binary/foo.png").content_type
-    assert_equal "text/plain; charset=iso-8859-2", blob("Text/README").content_type
+    assert_equal "application/pdf", fixture_blob_memory("Binary/foo.pdf").content_type
+    assert_equal "image/png", fixture_blob_memory("Binary/foo.png").content_type
+    assert_equal "text/plain; charset=iso-8859-2", fixture_blob_memory("Data/README").content_type
   end
 
   def test_disposition
-    assert_equal "attachment; filename=foo+bar.jar", blob("Binary/foo bar.jar").disposition
-    assert_equal "attachment; filename=foo.bin", blob("Binary/foo.bin").disposition
-    assert_equal "attachment; filename=linguist.gem", blob("Binary/linguist.gem").disposition
-    assert_equal "attachment; filename=octocat.ai", blob("Binary/octocat.ai").disposition
-    assert_equal "inline", blob("Text/README").disposition
-    assert_equal "inline", blob("Text/foo.txt").disposition
-    assert_equal "inline", blob("Ruby/grit.rb").disposition
-    assert_equal "inline", blob("Binary/octocat.png").disposition
+    assert_equal "attachment; filename=foo+bar.jar", fixture_blob_memory("Binary/foo bar.jar").disposition
+    assert_equal "attachment; filename=foo.bin", fixture_blob_memory("Binary/foo.bin").disposition
+    assert_equal "attachment; filename=linguist.gem", fixture_blob_memory("Binary/linguist.gem").disposition
+    assert_equal "attachment; filename=octocat.ai", fixture_blob_memory("Binary/octocat.ai").disposition
+    assert_equal "inline", fixture_blob_memory("Data/README").disposition
+    assert_equal "inline", sample_blob_memory("Text/foo.txt").disposition
+    assert_equal "inline", sample_blob_memory("Ruby/grit.rb").disposition
+    assert_equal "inline", fixture_blob_memory("Binary/octocat.png").disposition
   end
 
   def test_data
-    assert_equal "module Foo\nend\n", blob("Ruby/foo.rb").data
+    assert_equal "module Foo\nend\n", sample_blob_memory("Ruby/foo.rb").data
   end
 
   def test_lines
-    assert_equal ["module Foo", "end", ""], blob("Ruby/foo.rb").lines
+    assert_equal ["module Foo", "end", ""], sample_blob_memory("Ruby/foo.rb").lines
+    assert_equal ["line 1", "line 2", ""], sample_blob_memory("Text/mac.txt").lines
+    assert_equal 475, sample_blob_memory("Emacs Lisp/ess-julia.el").lines.length
   end
 
-  def test_mac_format
-    assert blob("Text/mac.txt").mac_format?
-  end
-
-  def test_lines_mac_format
-    assert_equal ["line 1", "line 2", ""], blob("Text/mac.txt").lines
+  def test_lines_maintains_original_encoding
+    # Even if the file's encoding is detected as something like UTF-16LE,
+    # earlier versions of the gem made implicit guarantees that the encoding of
+    # each `line` is in the same encoding as the file was originally read (in
+    # practice, UTF-8 or ASCII-8BIT)
+    assert_equal Encoding.default_external, fixture_blob_memory("Data/utf16le").lines.first.encoding
   end
 
   def test_size
-    assert_equal 15, blob("Ruby/foo.rb").size
+    assert_equal 15, sample_blob_memory("Ruby/foo.rb").size
   end
 
   def test_loc
-    assert_equal 3, blob("Ruby/foo.rb").loc
+    assert_equal 3, sample_blob_memory("Ruby/foo.rb").loc
   end
 
   def test_sloc
-    assert_equal 2, blob("Ruby/foo.rb").sloc
+    assert_equal 2, sample_blob_memory("Ruby/foo.rb").sloc
+    assert_equal 3, fixture_blob_memory("Data/utf16le-windows").sloc
+    assert_equal 1, fixture_blob_memory("Data/iso8859-8-i").sloc
   end
 
   def test_encoding
-    assert_equal "ISO-8859-2", blob("Text/README").encoding
-    assert_equal "ISO-8859-1", blob("Text/dump.sql").encoding
-    assert_equal "UTF-8", blob("Text/foo.txt").encoding
-    assert_nil blob("Binary/dog.o").encoding
+    assert_equal "ISO-8859-2", fixture_blob_memory("Data/README").encoding
+    assert_equal "ISO-8859-2", fixture_blob_memory("Data/README").ruby_encoding
+    assert_equal "UTF-8", sample_blob_memory("Text/foo.txt").encoding
+    assert_equal "UTF-8", sample_blob_memory("Text/foo.txt").ruby_encoding
+    assert_equal "UTF-16LE", fixture_blob_memory("Data/utf16le").encoding
+    assert_equal "UTF-16LE", fixture_blob_memory("Data/utf16le").ruby_encoding
+    assert_equal "UTF-16LE", fixture_blob_memory("Data/utf16le-windows").encoding
+    assert_equal "UTF-16LE", fixture_blob_memory("Data/utf16le-windows").ruby_encoding
+    assert_equal "ISO-2022-KR", sample_blob_memory("Text/ISO-2022-KR.txt").encoding
+    assert_equal "binary", sample_blob_memory("Text/ISO-2022-KR.txt").ruby_encoding
+    assert_nil fixture_blob_memory("Binary/dog.o").encoding
   end
 
   def test_binary
-    # Large blobs aren't loaded
-    large_blob = blob("git.exe")
-    large_blob.instance_eval do
-      def data; end
-    end
-    assert large_blob.binary?
+    assert fixture_blob_memory("Binary/git.deb").binary?
+    assert fixture_blob_memory("Binary/hello.pbc").binary?
+    assert fixture_blob_memory("Binary/linguist.gem").binary?
+    assert fixture_blob_memory("Binary/octocat.ai").binary?
+    assert fixture_blob_memory("Binary/octocat.png").binary?
+    assert fixture_blob_memory("Binary/zip").binary?
+    assert !fixture_blob_memory("Data/README").binary?
+    assert !sample_blob_memory("Ruby/foo.rb").binary?
+    assert !sample_blob_memory("Perl/script.pl").binary?
+  end
 
-    assert blob("Binary/git.deb").binary?
-    assert blob("Binary/git.exe").binary?
-    assert blob("Binary/hello.pbc").binary?
-    assert blob("Binary/linguist.gem").binary?
-    assert blob("Binary/octocat.ai").binary?
-    assert blob("Binary/octocat.png").binary?
-    assert blob("Binary/zip").binary?
-    assert !blob("Text/README").binary?
-    assert !blob("Text/file.txt").binary?
-    assert !blob("Ruby/foo.rb").binary?
-    assert !blob("Perl/script.pl").binary?
+  def test_all_binary
+    Samples.each do |sample|
+      blob = sample_blob_memory(sample[:path])
+      assert ! (blob.likely_binary? || blob.binary?), "#{sample[:path]} is a binary file"
+    end
   end
 
   def test_text
-    assert blob("Text/README").text?
-    assert blob("Text/dump.sql").text?
-    assert blob("Text/file.json").text?
-    assert blob("Text/file.txt").text?
-    assert blob("Text/md").text?
-    assert blob("Shell/script.sh").text?
-    assert blob("Text/txt").text?
+    assert fixture_blob_memory("Data/README").text?
+    assert fixture_blob_memory("Data/md").text?
+    assert sample_blob_memory("Shell/script.sh").text?
+    assert fixture_blob_memory("Data/txt").text?
   end
 
   def test_image
-    assert blob("Binary/octocat.gif").image?
-    assert blob("Binary/octocat.jpeg").image?
-    assert blob("Binary/octocat.jpg").image?
-    assert blob("Binary/octocat.png").image?
-    assert !blob("Binary/octocat.ai").image?
-    assert !blob("Binary/octocat.psd").image?
+    assert fixture_blob_memory("Binary/octocat.png").image?
+    assert !fixture_blob_memory("Binary/octocat.ai").image?
+    assert !fixture_blob_memory("Binary/octocat.psd").image?
+  end
+
+  def test_solid
+    assert fixture_blob_memory("Binary/cube.stl").solid?
+    assert fixture_blob_memory("Data/cube.stl").solid?
+  end
+
+  def test_csv
+    assert sample_blob_memory("CSV/cars.csv").csv?
+  end
+
+  def test_pdf
+    assert fixture_blob_memory("Binary/foo.pdf").pdf?
   end
 
   def test_viewable
-    assert blob("Text/README").viewable?
-    assert blob("Ruby/foo.rb").viewable?
-    assert blob("Perl/script.pl").viewable?
-    assert !blob("Binary/linguist.gem").viewable?
-    assert !blob("Binary/octocat.ai").viewable?
-    assert !blob("Binary/octocat.png").viewable?
+    assert fixture_blob_memory("Data/README").viewable?
+    assert sample_blob_memory("Ruby/foo.rb").viewable?
+    assert sample_blob_memory("Perl/script.pl").viewable?
+    assert !fixture_blob_memory("Binary/linguist.gem").viewable?
+    assert !fixture_blob_memory("Binary/octocat.ai").viewable?
+    assert !fixture_blob_memory("Binary/octocat.png").viewable?
   end
 
   def test_generated
-    assert !blob("Text/README").generated?
-
-    # Xcode project files
-    assert blob("XML/MainMenu.xib").generated?
-    assert blob("Binary/MainMenu.nib").generated?
-    assert blob("XML/project.pbxproj").generated?
-
-    # Gemfile.locks
-    assert blob("Gemfile.lock").generated?
+    assert !fixture_blob_memory("Data/README").generated?
 
     # Generated .NET Docfiles
-    assert blob("XML/net_docfile.xml").generated?
+    assert sample_blob_memory("XML/net_docfile.xml").generated?
 
     # Long line
-    assert !blob("JavaScript/uglify.js").generated?
+    assert !sample_blob_memory("JavaScript/uglify.js").generated?
 
     # Inlined JS, but mostly code
-    assert !blob("JavaScript/json2_backbone.js").generated?
+    assert !sample_blob_memory("JavaScript/json2_backbone.js").generated?
 
     # Minified JS
-    assert !blob("JavaScript/jquery-1.6.1.js").generated?
-    assert blob("JavaScript/jquery-1.6.1.min.js").generated?
-    assert blob("JavaScript/jquery-1.4.2.min.js").generated?
+    assert !sample_blob_memory("JavaScript/jquery-1.6.1.js").generated?
+    assert sample_blob_memory("JavaScript/jquery-1.6.1.min.js").generated?
+    assert sample_blob_memory("JavaScript/jquery-1.4.2.min.js").generated?
 
-    # CoffeeScript-generated JS
-    # TODO
+    # Go lockfiles
+    assert sample_blob_memory("TOML/filenames/Gopkg.lock").generated?
+    assert sample_blob_memory("YAML/filenames/glide.lock").generated?
+
+    # Cargo generated Cargo.lock file
+    assert sample_blob_memory("TOML/filenames/Cargo.lock").generated?
+
+    # Composer generated composer.lock file
+    assert sample_blob_memory("JSON/filenames/composer.lock").generated?
 
     # PEG.js-generated parsers
-    assert blob("JavaScript/parser.js").generated?
+    assert sample_blob_memory("JavaScript/parser.js").generated?
+
+    # Generated PostScript
+    assert !sample_blob_memory("PostScript/sierpinski.ps").generated?
 
     # These examples are too basic to tell
-    assert !blob("JavaScript/empty.js").generated?
-    assert !blob("JavaScript/hello.js").generated?
+    assert !sample_blob_memory("JavaScript/hello.js").generated?
 
-    assert blob("JavaScript/intro-old.js").generated?
-    assert blob("JavaScript/classes-old.js").generated?
+    assert sample_blob_memory("JavaScript/intro-old.js").generated?
+    assert sample_blob_memory("JavaScript/classes-old.js").generated?
 
-    assert blob("JavaScript/intro.js").generated?
-    assert blob("JavaScript/classes.js").generated?
+    assert sample_blob_memory("JavaScript/intro.js").generated?
+    assert sample_blob_memory("JavaScript/classes.js").generated?
+
+    assert sample_blob_memory("JavaScript/ccalc-lex.js").generated?
+    assert sample_blob_memory("JavaScript/ccalc-parse.js").generated?
+
+    # Protocol Buffer generated code
+    assert sample_blob_memory("C++/protocol-buffer.pb.h").generated?
+    assert sample_blob_memory("C++/protocol-buffer.pb.cc").generated?
+    assert sample_blob_memory("Java/ProtocolBuffer.java").generated?
+    assert sample_blob_memory("Python/protocol_buffer_pb2.py").generated?
+    assert sample_blob_memory("Go/api.pb.go").generated?
+    assert sample_blob_memory("Go/embedded.go").generated?
+    assert sample_blob_memory("JavaScript/proto.js").generated?
+
+    # Apache Thrift generated code
+    assert sample_blob_memory("Python/gen-py-linguist-thrift.py").generated?
+    assert sample_blob_memory("Go/gen-go-linguist-thrift.go").generated?
+    assert sample_blob_memory("Java/gen-java-linguist-thrift.java").generated?
+    assert sample_blob_memory("JavaScript/gen-js-linguist-thrift.js").generated?
+    assert sample_blob_memory("Ruby/gen-rb-linguist-thrift.rb").generated?
+    assert sample_blob_memory("Objective-C/gen-cocoa-linguist-thrift.m").generated?
+    assert sample_blob_memory("PHP/ThriftGenerated.php").generated?
+
+    # Generated JNI
+    assert sample_blob_memory("C/jni_layer.h").generated?
+
+    # Minified CSS
+    assert !sample_blob_memory("CSS/bootstrap.css").generated?
+    assert sample_blob_memory("CSS/bootstrap.min.css").generated?
+
+    # Generated VCR
+    assert sample_blob_memory("YAML/vcr_cassette.yml").generated?
+
+    # Generated by Zephir
+    assert !sample_blob_memory("Zephir/Router.zep").generated?
+
+    # Go vendored dependencies
+    refute sample_blob("vendor/vendor.json").generated?
+    assert sample_blob("vendor/github.com/kr/s3/sign.go").generated?
+    refute fixture_blob("go/food_vendor/candy.go").generated?
+
+    # Cython-generated C/C++
+    assert sample_blob_memory("C/sgd_fast.c").generated?
+    assert sample_blob_memory("C++/wrapper_inner.cpp").generated?
+
+    # Unity3D-generated metadata
+    assert sample_blob_memory("Unity3D Asset/Tiles.meta").generated?
+
+    # Racc-generated Ruby
+    assert sample_blob_memory("Ruby/racc.rb").generated?
+
+    # protobuf/grpc-plugin C++
+    assert sample_blob_memory("C++/hello.grpc.pb.h").generated?
+    assert sample_blob_memory("C++/grpc.pb.cc").generated?
   end
 
   def test_vendored
-    assert !blob("Text/README").vendored?
-    assert !blob("ext/extconf.rb").vendored?
-
-    # Node depedencies
-    assert blob("node_modules/coffee-script/lib/coffee-script.js").vendored?
-
-    # Rails vendor/
-    assert blob("vendor/plugins/will_paginate/lib/will_paginate.rb").vendored?
-
-    # C deps
-    assert blob("deps/http_parser/http_parser.c").vendored?
-    assert blob("deps/v8/src/v8.h").vendored?
-
-    # Prototype
-    assert !blob("public/javascripts/application.js").vendored?
-    assert blob("public/javascripts/prototype.js").vendored?
-    assert blob("public/javascripts/effects.js").vendored?
-    assert blob("public/javascripts/controls.js").vendored?
-    assert blob("public/javascripts/dragdrop.js").vendored?
-
-    # jQuery
-    assert blob("jquery.js").vendored?
-    assert blob("public/javascripts/jquery.js").vendored?
-    assert blob("public/javascripts/jquery.min.js").vendored?
-    assert blob("public/javascripts/jquery-1.7.js").vendored?
-    assert blob("public/javascripts/jquery-1.7.min.js").vendored?
-    assert blob("public/javascripts/jquery-1.5.2.js").vendored?
-    assert blob("public/javascripts/jquery-1.6.1.js").vendored?
-    assert blob("public/javascripts/jquery-1.6.1.min.js").vendored?
-    assert !blob("public/javascripts/jquery.github.menu.js").vendored?
-
-    # MooTools
-    assert blob("public/javascripts/mootools-core-1.3.2-full-compat.js").vendored?
-    assert blob("public/javascripts/mootools-core-1.3.2-full-compat-yc.js").vendored?
-
-    # Dojo
-    assert blob("public/javascripts/dojo.js").vendored?
-
-    # MochiKit
-    assert blob("public/javascripts/MochiKit.js").vendored?
-
-    # YUI
-    assert blob("public/javascripts/yahoo-dom-event.js").vendored?
-    assert blob("public/javascripts/yahoo-min.js").vendored?
-    assert blob("public/javascripts/yuiloader-dom-event.js").vendored?
-
-    # LESS
-    assert blob("public/javascripts/less-1.1.0.js").vendored?
-    assert blob("public/javascripts/less-1.1.0.min.js").vendored?
-
-    # WYS editors
-    assert blob("public/javascripts/ckeditor.js").vendored?
-    assert blob("public/javascripts/tiny_mce.js").vendored?
-    assert blob("public/javascripts/tiny_mce_popup.js").vendored?
-    assert blob("public/javascripts/tiny_mce_src.js").vendored?
-
-    # Fabric
-    assert blob("fabfile.py").vendored?
-
-    # WAF
-    assert blob("waf").vendored?
-
-    # Visual Studio IntelliSense
-    assert blob("Scripts/jquery-1.7-vsdoc.js").vendored?
-
-    # Microsoft Ajax
-    assert blob("Scripts/MicrosoftAjax.debug.js").vendored?
-    assert blob("Scripts/MicrosoftAjax.js").vendored?
-    assert blob("Scripts/MicrosoftMvcAjax.debug.js").vendored?
-    assert blob("Scripts/MicrosoftMvcAjax.js").vendored?
-    assert blob("Scripts/MicrosoftMvcValidation.debug.js").vendored?
-    assert blob("Scripts/MicrosoftMvcValidation.js").vendored?
-
-    # jQuery validation plugin (MS bundles this with asp.net mvc)
-    assert blob("Scripts/jquery.validate.js").vendored?
-
-    # NuGet Packages
-    assert blob("packages/Modernizr.2.0.6/Content/Scripts/modernizr-2.0.6-development-only.js").vendored?
-  end
-
-  def test_indexable
-    assert blob("Ruby/foo.rb").indexable?
-    assert !blob("Text/defu.nkt").indexable?
-    assert !blob("Text/dump.sql").indexable?
-    assert !blob("Binary/github.po").indexable?
-    assert !blob("Binary/linguist.gem").indexable?
-
-    # large binary blobs should fail on size check first, not call 
-    # into charlock_holmes and alloc big buffers for testing encoding
-    b = blob("Binary/octocat.ai")
-    b.expects(:binary?).never
-    assert !b.indexable?
+    assert !fixture_blob_memory("Data/README").vendored?
   end
 
   def test_language
     Samples.each do |sample|
-      blob = blob(sample[:path])
+      blob = sample_blob_memory(sample[:path])
       assert blob.language, "No language for #{sample[:path]}"
       assert_equal sample[:language], blob.language.name, blob.name
     end
+
+    # Test language detection for files which shouldn't be used as samples
+    root = File.expand_path('../fixtures', __FILE__)
+    Dir.entries(root).each do |language|
+      next if language == '.' || language == '..' || language == 'Binary' ||
+              File.basename(language) == 'ace_modes.json'
+
+      # Each directory contains test files of a language
+      dirname = File.join(root, language)
+      Dir.entries(dirname).each do |filename|
+        # By default blob search the file in the samples;
+        # thus, we need to give it the absolute path
+        filepath = File.join(dirname, filename)
+        next unless File.file?(filepath)
+
+        blob = fixture_blob_memory(filepath)
+        if language == 'Data'
+          assert blob.language.nil?, "A language was found for #{filepath}"
+        elsif language == 'Generated'
+          assert blob.generated?, "#{filepath} is not a generated file"
+        else
+          assert blob.language, "No language for #{filepath}"
+          assert_equal language, blob.language.name, blob.name
+        end
+      end
+    end
   end
 
-  def test_lexer
-    assert_equal Lexer['Ruby'], blob("Ruby/foo.rb").lexer
+  def test_minified_files_not_safe_to_highlight
+    assert !sample_blob_memory("JavaScript/jquery-1.6.1.min.js").safe_to_colorize?
   end
 
-  def test_colorize
-    assert_equal <<-HTML, blob("Ruby/foo.rb").colorize
-<div class="highlight"><pre><span class="k">module</span> <span class="nn">Foo</span>
-<span class="k">end</span>
-</pre>
-</div>
-    HTML
+  def test_empty
+    blob = Struct.new(:data) { include Linguist::BlobHelper }
+
+    assert blob.new("").empty?
+    assert blob.new(nil).empty?
+    refute blob.new(" ").empty?
+    refute blob.new("nope").empty?
   end
 
-  def test_colorize_without_wrapper
-    assert_equal <<-HTML, blob("Ruby/foo.rb").colorize_without_wrapper
-<span class="k">module</span> <span class="nn">Foo</span>
-<span class="k">end</span>
-    HTML
-  end
+  def test_include_in_language_stats
+    generated = sample_blob_memory("CSS/bootstrap.min.css")
+    assert_predicate generated, :generated?
+    refute_predicate generated, :include_in_language_stats?
 
-  def test_colorize_does_skip_minified_files
-    assert_nil blob("JavaScript/jquery-1.6.1.min.js").colorize
-  end
+    data = sample_blob_memory("Ant Build System/filenames/ant.xml")
+    assert_equal :data, data.language.type
+    refute_predicate data, :include_in_language_stats?
 
-  # Pygments.rb was taking exceeding long on this particular file
-  def test_colorize_doesnt_blow_up_with_files_with_high_ratio_of_long_lines
-    assert_nil blob("JavaScript/steelseries-min.js").colorize
+    prose = sample_blob_memory("Markdown/tender.md")
+    assert_equal :prose, prose.language.type
+    refute_predicate prose, :include_in_language_stats?
+
+    included = sample_blob_memory("HTML/pages.html")
+    assert_predicate included, :include_in_language_stats?
+
+    # Test detectable override (i.e by .gitattributes)
+
+    def prose.detectable?; true end
+    assert_predicate prose, :include_in_language_stats?
+
+    included_not_detectable = included.clone()
+    def included_not_detectable.detectable?; false end
+    refute_predicate included_not_detectable, :include_in_language_stats?
+
+    # Test not included if vendored, documentation or generated overridden
+    # even if detectable
+
+    included_vendored = included.clone()
+    def included_vendored.vendored?; true end
+    refute_predicate included_vendored, :include_in_language_stats?
+    def included_vendored.detectable?; true end
+    refute_predicate included_vendored, :include_in_language_stats?
+
+    included_documentation = included.clone()
+    def included_documentation.documentation?; true end
+    refute_predicate included_documentation, :include_in_language_stats?
+    def included_documentation.detectable?; true end
+    refute_predicate included_documentation, :include_in_language_stats?
+
+    included_generated = included.clone()
+    def included_generated.generated?; true end
+    refute_predicate included_generated, :include_in_language_stats?
+    def included_generated.detectable?; true end
+    refute_predicate included_generated, :include_in_language_stats?
+
   end
 end
